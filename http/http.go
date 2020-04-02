@@ -2,12 +2,12 @@ package http
 
 import (
 	"fmt"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/urfave/cli"
+	"github.com/valyala/fasthttp"
 )
 
 // TestOption 测试参数
@@ -45,17 +45,20 @@ func Test(c *cli.Context) error {
 		Number: c.Int("number"),
 	}
 	testData := &TestData{}
+	// 请求结果通道
 	channel := make(chan RequestResult, testOption.Co)
 	tasksGroup := sync.WaitGroup{}
 	parseGroup := sync.WaitGroup{}
 	tasksGroup.Add(testOption.Co)
 	parseGroup.Add(1)
 
+	// 接收请求响应结果协程
 	go func() {
 		defer parseGroup.Done()
 		ParseResult(testOption, testData, channel)
 	}()
 
+	// 请求工作协程
 	for i := 0; i < testOption.Co; i++ {
 		go func() {
 			defer tasksGroup.Done()
@@ -71,34 +74,32 @@ func Test(c *cli.Context) error {
 
 // TestTask 测试任务
 func TestTask(testOption *TestOption, testData *TestData, channel chan RequestResult) {
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	tmpBuffer := make([]byte, 4096)
 	maxNumber := int32(testOption.Number)
 	for {
 		if atomic.AddInt32(&testData.requestCount, 1) > maxNumber {
 			return
 		}
+
+		request := fasthttp.AcquireRequest()
+		request.SetRequestURI(testOption.URL)
+		response := fasthttp.AcquireResponse()
+
 		result := RequestResult{
 			BeginTime: time.Now(),
 		}
-
-		response, err := client.Get(testOption.URL)
+		err := fasthttp.Do(request, response)
+		response.Body()
 		result.EndTime = time.Now()
-		if err == nil {
-			result.Success = true
-			for {
-				length, err := response.Body.Read(tmpBuffer)
-				result.ByteLength += length
-				if err != nil || length == 0 {
-					break
-				}
-			}
-			response.Body.Close()
-		} else {
+
+		if err != nil {
 			result.Success = false
+		} else {
+			result.Success = true
+			result.ByteLength += len(response.Body())
 		}
+		fasthttp.ReleaseRequest(request)
+		fasthttp.ReleaseResponse(response)
+
 		channel <- result
 	}
 }
